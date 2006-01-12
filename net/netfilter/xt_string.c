@@ -11,23 +11,26 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/skbuff.h>
-#include <linux/netfilter_ipv4/ip_tables.h>
-#include <linux/netfilter_ipv4/ipt_string.h>
+#include <linux/netfilter/x_tables.h>
+#include <linux/netfilter/xt_string.h>
 #include <linux/textsearch.h>
 
 MODULE_AUTHOR("Pablo Neira Ayuso <pablo@eurodev.net>");
 MODULE_DESCRIPTION("IP tables string match module");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("ipt_string");
+MODULE_ALIAS("ip6t_string");
 
 static int match(const struct sk_buff *skb,
 		 const struct net_device *in,
 		 const struct net_device *out,
 		 const void *matchinfo,
 		 int offset,
+		 unsigned int protoff,
 		 int *hotdrop)
 {
 	struct ts_state state;
-	struct ipt_string_info *conf = (struct ipt_string_info *) matchinfo;
+	struct xt_string_info *conf = (struct xt_string_info *) matchinfo;
 
 	memset(&state, 0, sizeof(struct ts_state));
 
@@ -36,18 +39,18 @@ static int match(const struct sk_buff *skb,
 			     != UINT_MAX) && !conf->invert;
 }
 
-#define STRING_TEXT_PRIV(m) ((struct ipt_string_info *) m)
+#define STRING_TEXT_PRIV(m) ((struct xt_string_info *) m)
 
 static int checkentry(const char *tablename,
-		      const struct ipt_ip *ip,
+		      const void *ip,
 		      void *matchinfo,
 		      unsigned int matchsize,
 		      unsigned int hook_mask)
 {
-	struct ipt_string_info *conf = matchinfo;
+	struct xt_string_info *conf = matchinfo;
 	struct ts_config *ts_conf;
 
-	if (matchsize != IPT_ALIGN(sizeof(struct ipt_string_info)))
+	if (matchsize != XT_ALIGN(sizeof(struct xt_string_info)))
 		return 0;
 
 	/* Damn, can't handle this case properly with iptables... */
@@ -69,7 +72,14 @@ static void destroy(void *matchinfo, unsigned int matchsize)
 	textsearch_destroy(STRING_TEXT_PRIV(matchinfo)->config);
 }
 
-static struct ipt_match string_match = {
+static struct xt_match string_match = {
+	.name 		= "string",
+	.match 		= match,
+	.checkentry	= checkentry,
+	.destroy 	= destroy,
+	.me 		= THIS_MODULE
+};
+static struct xt_match string6_match = {
 	.name 		= "string",
 	.match 		= match,
 	.checkentry	= checkentry,
@@ -79,12 +89,22 @@ static struct ipt_match string_match = {
 
 static int __init init(void)
 {
-	return ipt_register_match(&string_match);
+	int ret;
+
+	ret = xt_register_match(AF_INET, &string_match);
+	if (ret)
+		return ret;
+	ret = xt_register_match(AF_INET6, &string6_match);
+	if (ret)
+		xt_unregister_match(AF_INET, &string_match);
+
+	return ret;
 }
 
 static void __exit fini(void)
 {
-	ipt_unregister_match(&string_match);
+	xt_unregister_match(AF_INET, &string_match);
+	xt_unregister_match(AF_INET6, &string6_match);
 }
 
 module_init(init);

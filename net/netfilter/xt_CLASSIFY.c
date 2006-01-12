@@ -15,12 +15,13 @@
 #include <linux/ip.h>
 #include <net/checksum.h>
 
-#include <linux/netfilter_ipv4/ip_tables.h>
-#include <linux/netfilter_ipv4/ipt_CLASSIFY.h>
+#include <linux/netfilter/x_tables.h>
+#include <linux/netfilter/xt_CLASSIFY.h>
 
 MODULE_AUTHOR("Patrick McHardy <kaber@trash.net>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("iptables qdisc classification target module");
+MODULE_ALIAS("ipt_CLASSIFY");
 
 static unsigned int
 target(struct sk_buff **pskb,
@@ -30,25 +31,25 @@ target(struct sk_buff **pskb,
        const void *targinfo,
        void *userinfo)
 {
-	const struct ipt_classify_target_info *clinfo = targinfo;
+	const struct xt_classify_target_info *clinfo = targinfo;
 
-	if((*pskb)->priority != clinfo->priority) 
+	if ((*pskb)->priority != clinfo->priority)
 		(*pskb)->priority = clinfo->priority;
 
-	return IPT_CONTINUE;
+	return XT_CONTINUE;
 }
 
 static int
 checkentry(const char *tablename,
-           const struct ipt_entry *e,
+           const void *e,
            void *targinfo,
            unsigned int targinfosize,
            unsigned int hook_mask)
 {
-	if (targinfosize != IPT_ALIGN(sizeof(struct ipt_classify_target_info))){
+	if (targinfosize != XT_ALIGN(sizeof(struct xt_classify_target_info))){
 		printk(KERN_ERR "CLASSIFY: invalid size (%u != %Zu).\n",
 		       targinfosize,
-		       IPT_ALIGN(sizeof(struct ipt_classify_target_info)));
+		       XT_ALIGN(sizeof(struct xt_classify_target_info)));
 		return 0;
 	}
 	
@@ -69,21 +70,39 @@ checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_target ipt_classify_reg = { 
+static struct xt_target classify_reg = { 
+	.name 		= "CLASSIFY", 
+	.target 	= target,
+	.checkentry	= checkentry,
+	.me 		= THIS_MODULE,
+};
+static struct xt_target classify6_reg = { 
 	.name 		= "CLASSIFY", 
 	.target 	= target,
 	.checkentry	= checkentry,
 	.me 		= THIS_MODULE,
 };
 
+
 static int __init init(void)
 {
-	return ipt_register_target(&ipt_classify_reg);
+	int ret;
+
+	ret = xt_register_target(AF_INET, &classify_reg);
+	if (ret)
+		return ret;
+
+	ret = xt_register_target(AF_INET6, &classify6_reg);
+	if (ret)
+		xt_unregister_target(AF_INET, &classify_reg);
+
+	return ret;
 }
 
 static void __exit fini(void)
 {
-	ipt_unregister_target(&ipt_classify_reg);
+	xt_unregister_target(AF_INET, &classify_reg);
+	xt_unregister_target(AF_INET6, &classify6_reg);
 }
 
 module_init(init);

@@ -18,12 +18,14 @@
 #include <linux/spinlock.h>
 #include <linux/interrupt.h>
 
-#include <linux/netfilter_ipv4/ip_tables.h>
-#include <linux/netfilter_ipv4/ipt_limit.h>
+#include <linux/netfilter/x_tables.h>
+#include <linux/netfilter/xt_limit.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Herve Eychenne <rv@wallfire.org>");
 MODULE_DESCRIPTION("iptables rate limit match");
+MODULE_ALIAS("ipt_limit");
+MODULE_ALIAS("ip6t_limit");
 
 /* The algorithm used is the Simple Token Bucket Filter (TBF)
  * see net/sched/sch_tbf.c in the linux source tree
@@ -68,9 +70,10 @@ ipt_limit_match(const struct sk_buff *skb,
 		const struct net_device *out,
 		const void *matchinfo,
 		int offset,
+		unsigned int protoff,
 		int *hotdrop)
 {
-	struct ipt_rateinfo *r = ((struct ipt_rateinfo *)matchinfo)->master;
+	struct xt_rateinfo *r = ((struct xt_rateinfo *)matchinfo)->master;
 	unsigned long now = jiffies;
 
 	spin_lock_bh(&limit_lock);
@@ -96,32 +99,32 @@ user2credits(u_int32_t user)
 	/* If multiplying would overflow... */
 	if (user > 0xFFFFFFFF / (HZ*CREDITS_PER_JIFFY))
 		/* Divide first. */
-		return (user / IPT_LIMIT_SCALE) * HZ * CREDITS_PER_JIFFY;
+		return (user / XT_LIMIT_SCALE) * HZ * CREDITS_PER_JIFFY;
 
-	return (user * HZ * CREDITS_PER_JIFFY) / IPT_LIMIT_SCALE;
+	return (user * HZ * CREDITS_PER_JIFFY) / XT_LIMIT_SCALE;
 }
 
 static int
 ipt_limit_checkentry(const char *tablename,
-		     const struct ipt_ip *ip,
+		     const void *inf,
 		     void *matchinfo,
 		     unsigned int matchsize,
 		     unsigned int hook_mask)
 {
-	struct ipt_rateinfo *r = matchinfo;
+	struct xt_rateinfo *r = matchinfo;
 
-	if (matchsize != IPT_ALIGN(sizeof(struct ipt_rateinfo)))
+	if (matchsize != XT_ALIGN(sizeof(struct xt_rateinfo)))
 		return 0;
 
 	/* Check for overflow. */
 	if (r->burst == 0
 	    || user2credits(r->avg * r->burst) < user2credits(r->avg)) {
-		printk("Overflow in ipt_limit, try lower: %u/%u\n",
+		printk("Overflow in xt_limit, try lower: %u/%u\n",
 		       r->avg, r->burst);
 		return 0;
 	}
 
-	/* User avg in seconds * IPT_LIMIT_SCALE: convert to jiffies *
+	/* User avg in seconds * XT_LIMIT_SCALE: convert to jiffies *
 	   128. */
 	r->prev = jiffies;
 	r->credit = user2credits(r->avg * r->burst);	 /* Credits full. */
@@ -134,7 +137,13 @@ ipt_limit_checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_match ipt_limit_reg = {
+static struct xt_match ipt_limit_reg = {
+	.name		= "limit",
+	.match		= ipt_limit_match,
+	.checkentry	= ipt_limit_checkentry,
+	.me		= THIS_MODULE,
+};
+static struct xt_match limit6_reg = {
 	.name		= "limit",
 	.match		= ipt_limit_match,
 	.checkentry	= ipt_limit_checkentry,
@@ -143,14 +152,23 @@ static struct ipt_match ipt_limit_reg = {
 
 static int __init init(void)
 {
-	if (ipt_register_match(&ipt_limit_reg))
-		return -EINVAL;
-	return 0;
+	int ret;
+	
+	ret = xt_register_match(AF_INET, &ipt_limit_reg);
+	if (ret)
+		return ret;
+	
+	ret = xt_register_match(AF_INET6, &limit6_reg);
+	if (ret)
+		xt_unregister_match(AF_INET, &ipt_limit_reg);
+
+	return ret;
 }
 
 static void __exit fini(void)
 {
-	ipt_unregister_match(&ipt_limit_reg);
+	xt_unregister_match(AF_INET, &ipt_limit_reg);
+	xt_unregister_match(AF_INET6, &limit6_reg);
 }
 
 module_init(init);

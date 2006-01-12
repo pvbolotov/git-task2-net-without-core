@@ -26,9 +26,10 @@
 MODULE_AUTHOR("Henrik Nordstrom <hno@marasytems.com>");
 MODULE_DESCRIPTION("IP tables CONNMARK matching module");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("ipt_CONNMARK");
 
-#include <linux/netfilter_ipv4/ip_tables.h>
-#include <linux/netfilter_ipv4/ipt_CONNMARK.h>
+#include <linux/netfilter/x_tables.h>
+#include <linux/netfilter/xt_CONNMARK.h>
 #include <net/netfilter/nf_conntrack_compat.h>
 
 static unsigned int
@@ -39,7 +40,7 @@ target(struct sk_buff **pskb,
        const void *targinfo,
        void *userinfo)
 {
-	const struct ipt_connmark_target_info *markinfo = targinfo;
+	const struct xt_connmark_target_info *markinfo = targinfo;
 	u_int32_t diff;
 	u_int32_t nfmark;
 	u_int32_t newmark;
@@ -48,17 +49,17 @@ target(struct sk_buff **pskb,
 
 	if (ctmark) {
 	    switch(markinfo->mode) {
-	    case IPT_CONNMARK_SET:
+	    case XT_CONNMARK_SET:
 		newmark = (*ctmark & ~markinfo->mask) | markinfo->mark;
 		if (newmark != *ctmark)
 		    *ctmark = newmark;
 		break;
-	    case IPT_CONNMARK_SAVE:
+	    case XT_CONNMARK_SAVE:
 		newmark = (*ctmark & ~markinfo->mask) | ((*pskb)->nfmark & markinfo->mask);
 		if (*ctmark != newmark)
 		    *ctmark = newmark;
 		break;
-	    case IPT_CONNMARK_RESTORE:
+	    case XT_CONNMARK_RESTORE:
 		nfmark = (*pskb)->nfmark;
 		diff = (*ctmark ^ nfmark) & markinfo->mask;
 		if (diff != 0)
@@ -67,25 +68,25 @@ target(struct sk_buff **pskb,
 	    }
 	}
 
-	return IPT_CONTINUE;
+	return XT_CONTINUE;
 }
 
 static int
 checkentry(const char *tablename,
-	   const struct ipt_entry *e,
+	   const void *entry,
 	   void *targinfo,
 	   unsigned int targinfosize,
 	   unsigned int hook_mask)
 {
-	struct ipt_connmark_target_info *matchinfo = targinfo;
-	if (targinfosize != IPT_ALIGN(sizeof(struct ipt_connmark_target_info))) {
+	struct xt_connmark_target_info *matchinfo = targinfo;
+	if (targinfosize != XT_ALIGN(sizeof(struct xt_connmark_target_info))) {
 		printk(KERN_WARNING "CONNMARK: targinfosize %u != %Zu\n",
 		       targinfosize,
-		       IPT_ALIGN(sizeof(struct ipt_connmark_target_info)));
+		       XT_ALIGN(sizeof(struct xt_connmark_target_info)));
 		return 0;
 	}
 
-	if (matchinfo->mode == IPT_CONNMARK_RESTORE) {
+	if (matchinfo->mode == XT_CONNMARK_RESTORE) {
 	    if (strcmp(tablename, "mangle") != 0) {
 		    printk(KERN_WARNING "CONNMARK: restore can only be called from \"mangle\" table, not \"%s\"\n", tablename);
 		    return 0;
@@ -100,7 +101,13 @@ checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_target ipt_connmark_reg = {
+static struct xt_target connmark_reg = {
+	.name = "CONNMARK",
+	.target = &target,
+	.checkentry = &checkentry,
+	.me = THIS_MODULE
+};
+static struct xt_target connmark6_reg = {
 	.name = "CONNMARK",
 	.target = &target,
 	.checkentry = &checkentry,
@@ -109,13 +116,25 @@ static struct ipt_target ipt_connmark_reg = {
 
 static int __init init(void)
 {
-	need_ip_conntrack();
-	return ipt_register_target(&ipt_connmark_reg);
+	int ret;
+
+	need_conntrack();
+
+	ret = xt_register_target(AF_INET, &connmark_reg);
+	if (ret)
+		return ret;
+
+	ret = xt_register_target(AF_INET6, &connmark6_reg);
+	if (ret)
+		xt_unregister_target(AF_INET, &connmark_reg);
+
+	return ret;
 }
 
 static void __exit fini(void)
 {
-	ipt_unregister_target(&ipt_connmark_reg);
+	xt_unregister_target(AF_INET, &connmark_reg);
+	xt_unregister_target(AF_INET6, &connmark6_reg);
 }
 
 module_init(init);

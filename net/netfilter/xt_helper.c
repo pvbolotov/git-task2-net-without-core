@@ -13,7 +13,6 @@
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/netfilter.h>
-#include <linux/interrupt.h>
 #if defined(CONFIG_IP_NF_CONNTRACK) || defined(CONFIG_IP_NF_CONNTRACK_MODULE)
 #include <linux/netfilter_ipv4/ip_conntrack.h>
 #include <linux/netfilter_ipv4/ip_conntrack_core.h>
@@ -23,12 +22,14 @@
 #include <net/netfilter/nf_conntrack_core.h>
 #include <net/netfilter/nf_conntrack_helper.h>
 #endif
-#include <linux/netfilter_ipv4/ip_tables.h>
-#include <linux/netfilter_ipv4/ipt_helper.h>
+#include <linux/netfilter/x_tables.h>
+#include <linux/netfilter/xt_helper.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Martin Josefsson <gandalf@netfilter.org>");
 MODULE_DESCRIPTION("iptables helper match module");
+MODULE_ALIAS("ipt_helper");
+MODULE_ALIAS("ip6t_helper");
 
 #if 0
 #define DEBUGP printk
@@ -43,27 +44,28 @@ match(const struct sk_buff *skb,
       const struct net_device *out,
       const void *matchinfo,
       int offset,
+      unsigned int protoff,
       int *hotdrop)
 {
-	const struct ipt_helper_info *info = matchinfo;
+	const struct xt_helper_info *info = matchinfo;
 	struct ip_conntrack *ct;
 	enum ip_conntrack_info ctinfo;
 	int ret = info->invert;
 	
 	ct = ip_conntrack_get((struct sk_buff *)skb, &ctinfo);
 	if (!ct) {
-		DEBUGP("ipt_helper: Eek! invalid conntrack?\n");
+		DEBUGP("xt_helper: Eek! invalid conntrack?\n");
 		return ret;
 	}
 
 	if (!ct->master) {
-		DEBUGP("ipt_helper: conntrack %p has no master\n", ct);
+		DEBUGP("xt_helper: conntrack %p has no master\n", ct);
 		return ret;
 	}
 
 	read_lock_bh(&ip_conntrack_lock);
 	if (!ct->master->helper) {
-		DEBUGP("ipt_helper: master ct %p has no helper\n", 
+		DEBUGP("xt_helper: master ct %p has no helper\n", 
 			exp->expectant);
 		goto out_unlock;
 	}
@@ -89,27 +91,28 @@ match(const struct sk_buff *skb,
       const struct net_device *out,
       const void *matchinfo,
       int offset,
+      unsigned int protoff,
       int *hotdrop)
 {
-	const struct ipt_helper_info *info = matchinfo;
+	const struct xt_helper_info *info = matchinfo;
 	struct nf_conn *ct;
 	enum ip_conntrack_info ctinfo;
 	int ret = info->invert;
 	
 	ct = nf_ct_get((struct sk_buff *)skb, &ctinfo);
 	if (!ct) {
-		DEBUGP("ipt_helper: Eek! invalid conntrack?\n");
+		DEBUGP("xt_helper: Eek! invalid conntrack?\n");
 		return ret;
 	}
 
 	if (!ct->master) {
-		DEBUGP("ipt_helper: conntrack %p has no master\n", ct);
+		DEBUGP("xt_helper: conntrack %p has no master\n", ct);
 		return ret;
 	}
 
 	read_lock_bh(&nf_conntrack_lock);
 	if (!ct->master->helper) {
-		DEBUGP("ipt_helper: master ct %p has no helper\n", 
+		DEBUGP("xt_helper: master ct %p has no helper\n", 
 			exp->expectant);
 		goto out_unlock;
 	}
@@ -129,23 +132,29 @@ out_unlock:
 #endif
 
 static int check(const char *tablename,
-		 const struct ipt_ip *ip,
+		 const void *inf,
 		 void *matchinfo,
 		 unsigned int matchsize,
 		 unsigned int hook_mask)
 {
-	struct ipt_helper_info *info = matchinfo;
+	struct xt_helper_info *info = matchinfo;
 
 	info->name[29] = '\0';
 
 	/* verify size */
-	if (matchsize != IPT_ALIGN(sizeof(struct ipt_helper_info)))
+	if (matchsize != XT_ALIGN(sizeof(struct xt_helper_info)))
 		return 0;
 
 	return 1;
 }
 
-static struct ipt_match helper_match = {
+static struct xt_match helper_match = {
+	.name		= "helper",
+	.match		= &match,
+	.checkentry	= &check,
+	.me		= THIS_MODULE,
+};
+static struct xt_match helper6_match = {
 	.name		= "helper",
 	.match		= &match,
 	.checkentry	= &check,
@@ -154,13 +163,24 @@ static struct ipt_match helper_match = {
 
 static int __init init(void)
 {
-	need_ip_conntrack();
-	return ipt_register_match(&helper_match);
+	int ret;
+	need_conntrack();
+
+	ret = xt_register_match(AF_INET, &helper_match);
+	if (ret < 0)
+		return ret;
+
+	ret = xt_register_match(AF_INET6, &helper6_match);
+	if (ret < 0)
+		xt_unregister_match(AF_INET, &helper_match);
+
+	return ret;
 }
 
 static void __exit fini(void)
 {
-	ipt_unregister_match(&helper_match);
+	xt_unregister_match(AF_INET, &helper_match);
+	xt_unregister_match(AF_INET6, &helper6_match);
 }
 
 module_init(init);

@@ -25,9 +25,10 @@
 MODULE_AUTHOR("Henrik Nordstrom <hno@marasytems.com>");
 MODULE_DESCRIPTION("IP tables connmark match module");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("ipt_connmark");
 
-#include <linux/netfilter_ipv4/ip_tables.h>
-#include <linux/netfilter_ipv4/ipt_connmark.h>
+#include <linux/netfilter/x_tables.h>
+#include <linux/netfilter/xt_connmark.h>
 #include <net/netfilter/nf_conntrack_compat.h>
 
 static int
@@ -36,9 +37,10 @@ match(const struct sk_buff *skb,
       const struct net_device *out,
       const void *matchinfo,
       int offset,
+      unsigned int protoff,
       int *hotdrop)
 {
-	const struct ipt_connmark_info *info = matchinfo;
+	const struct xt_connmark_info *info = matchinfo;
 	u_int32_t ctinfo;
 	const u_int32_t *ctmark = nf_ct_get_mark(skb, &ctinfo);
 	if (!ctmark)
@@ -49,14 +51,14 @@ match(const struct sk_buff *skb,
 
 static int
 checkentry(const char *tablename,
-	   const struct ipt_ip *ip,
+	   const void *ip,
 	   void *matchinfo,
 	   unsigned int matchsize,
 	   unsigned int hook_mask)
 {
-	struct ipt_connmark_info *cm = 
-				(struct ipt_connmark_info *)matchinfo;
-	if (matchsize != IPT_ALIGN(sizeof(struct ipt_connmark_info)))
+	struct xt_connmark_info *cm = 
+				(struct xt_connmark_info *)matchinfo;
+	if (matchsize != XT_ALIGN(sizeof(struct xt_connmark_info)))
 		return 0;
 
 	if (cm->mark > 0xffffffff || cm->mask > 0xffffffff) {
@@ -67,21 +69,40 @@ checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_match connmark_match = {
+static struct xt_match connmark_match = {
+	.name = "connmark",
+	.match = &match,
+	.checkentry = &checkentry,
+	.me = THIS_MODULE
+};
+static struct xt_match connmark6_match = {
 	.name = "connmark",
 	.match = &match,
 	.checkentry = &checkentry,
 	.me = THIS_MODULE
 };
 
+
 static int __init init(void)
 {
-	return ipt_register_match(&connmark_match);
+	int ret;
+
+	need_conntrack();
+
+	ret = xt_register_match(AF_INET, &connmark_match);
+	if (ret)
+		return ret;
+
+	ret = xt_register_match(AF_INET6, &connmark6_match);
+	if (ret)
+		xt_unregister_match(AF_INET, &connmark_match);
+	return ret;
 }
 
 static void __exit fini(void)
 {
-	ipt_unregister_match(&connmark_match);
+	xt_unregister_match(AF_INET6, &connmark6_match);
+	xt_unregister_match(AF_INET, &connmark_match);
 }
 
 module_init(init);

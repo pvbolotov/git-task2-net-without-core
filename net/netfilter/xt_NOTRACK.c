@@ -4,8 +4,11 @@
 #include <linux/module.h>
 #include <linux/skbuff.h>
 
-#include <linux/netfilter_ipv4/ip_tables.h>
+#include <linux/netfilter/x_tables.h>
 #include <net/netfilter/nf_conntrack_compat.h>
+
+MODULE_LICENSE("GPL");
+MODULE_ALIAS("ipt_NOTRACK");
 
 static unsigned int
 target(struct sk_buff **pskb,
@@ -17,7 +20,7 @@ target(struct sk_buff **pskb,
 {
 	/* Previously seen (loopback)? Ignore. */
 	if ((*pskb)->nfct != NULL)
-		return IPT_CONTINUE;
+		return XT_CONTINUE;
 
 	/* Attach fake conntrack entry. 
 	   If there is a real ct entry correspondig to this packet, 
@@ -27,12 +30,12 @@ target(struct sk_buff **pskb,
 	(*pskb)->nfctinfo = IP_CT_NEW;
 	nf_conntrack_get((*pskb)->nfct);
 
-	return IPT_CONTINUE;
+	return XT_CONTINUE;
 }
 
 static int
 checkentry(const char *tablename,
-	   const struct ipt_entry *e,
+	   const void *entry,
            void *targinfo,
            unsigned int targinfosize,
            unsigned int hook_mask)
@@ -51,26 +54,39 @@ checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_target ipt_notrack_reg = { 
+static struct xt_target notrack_reg = { 
 	.name = "NOTRACK", 
 	.target = target, 
 	.checkentry = checkentry,
-	.me = THIS_MODULE 
+	.me = THIS_MODULE,
+};
+static struct xt_target notrack6_reg = { 
+	.name = "NOTRACK", 
+	.target = target, 
+	.checkentry = checkentry,
+	.me = THIS_MODULE,
 };
 
 static int __init init(void)
 {
-	if (ipt_register_target(&ipt_notrack_reg))
-		return -EINVAL;
+	int ret;
 
-	return 0;
+	ret = xt_register_target(AF_INET, &notrack_reg);
+	if (ret)
+		return ret;
+
+	ret = xt_register_target(AF_INET6, &notrack6_reg);
+	if (ret)
+		xt_unregister_target(AF_INET, &notrack_reg);
+
+	return ret;
 }
 
 static void __exit fini(void)
 {
-	ipt_unregister_target(&ipt_notrack_reg);
+	xt_unregister_target(AF_INET6, &notrack6_reg);
+	xt_unregister_target(AF_INET, &notrack_reg);
 }
 
 module_init(init);
 module_exit(fini);
-MODULE_LICENSE("GPL");

@@ -6,13 +6,15 @@
  * 	- add functionality to match number of packets
  * 	- add functionality to match average packet size
  * 	- add support to match directions seperately
+ * 2005-10-16 Harald Welte <laforge@netfilter.org>
+ * 	- Port to x_tables
  *
  */
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <net/netfilter/nf_conntrack_compat.h>
-#include <linux/netfilter_ipv4/ip_tables.h>
-#include <linux/netfilter_ipv4/ipt_connbytes.h>
+#include <linux/netfilter/x_tables.h>
+#include <linux/netfilter/xt_connbytes.h>
 
 #include <asm/div64.h>
 #include <asm/bitops.h>
@@ -20,6 +22,7 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Harald Welte <laforge@netfilter.org>");
 MODULE_DESCRIPTION("iptables match for matching number of pkts/bytes per connection");
+MODULE_ALIAS("ipt_connbytes");
 
 /* 64bit divisor, dividend and result. dynamic precision */
 static u_int64_t div64_64(u_int64_t dividend, u_int64_t divisor)
@@ -43,9 +46,10 @@ match(const struct sk_buff *skb,
       const struct net_device *out,
       const void *matchinfo,
       int offset,
+      unsigned int protoff,
       int *hotdrop)
 {
-	const struct ipt_connbytes_info *sinfo = matchinfo;
+	const struct xt_connbytes_info *sinfo = matchinfo;
 	u_int64_t what = 0;	/* initialize to make gcc happy */
 	const struct ip_conntrack_counter *counters;
 
@@ -53,45 +57,45 @@ match(const struct sk_buff *skb,
 		return 0; /* no match */
 
 	switch (sinfo->what) {
-	case IPT_CONNBYTES_PKTS:
+	case XT_CONNBYTES_PKTS:
 		switch (sinfo->direction) {
-		case IPT_CONNBYTES_DIR_ORIGINAL:
+		case XT_CONNBYTES_DIR_ORIGINAL:
 			what = counters[IP_CT_DIR_ORIGINAL].packets;
 			break;
-		case IPT_CONNBYTES_DIR_REPLY:
+		case XT_CONNBYTES_DIR_REPLY:
 			what = counters[IP_CT_DIR_REPLY].packets;
 			break;
-		case IPT_CONNBYTES_DIR_BOTH:
+		case XT_CONNBYTES_DIR_BOTH:
 			what = counters[IP_CT_DIR_ORIGINAL].packets;
 			what += counters[IP_CT_DIR_REPLY].packets;
 			break;
 		}
 		break;
-	case IPT_CONNBYTES_BYTES:
+	case XT_CONNBYTES_BYTES:
 		switch (sinfo->direction) {
-		case IPT_CONNBYTES_DIR_ORIGINAL:
+		case XT_CONNBYTES_DIR_ORIGINAL:
 			what = counters[IP_CT_DIR_ORIGINAL].bytes;
 			break;
-		case IPT_CONNBYTES_DIR_REPLY:
+		case XT_CONNBYTES_DIR_REPLY:
 			what = counters[IP_CT_DIR_REPLY].bytes;
 			break;
-		case IPT_CONNBYTES_DIR_BOTH:
+		case XT_CONNBYTES_DIR_BOTH:
 			what = counters[IP_CT_DIR_ORIGINAL].bytes;
 			what += counters[IP_CT_DIR_REPLY].bytes;
 			break;
 		}
 		break;
-	case IPT_CONNBYTES_AVGPKT:
+	case XT_CONNBYTES_AVGPKT:
 		switch (sinfo->direction) {
-		case IPT_CONNBYTES_DIR_ORIGINAL:
+		case XT_CONNBYTES_DIR_ORIGINAL:
 			what = div64_64(counters[IP_CT_DIR_ORIGINAL].bytes,
 					counters[IP_CT_DIR_ORIGINAL].packets);
 			break;
-		case IPT_CONNBYTES_DIR_REPLY:
+		case XT_CONNBYTES_DIR_REPLY:
 			what = div64_64(counters[IP_CT_DIR_REPLY].bytes,
 					counters[IP_CT_DIR_REPLY].packets);
 			break;
-		case IPT_CONNBYTES_DIR_BOTH:
+		case XT_CONNBYTES_DIR_BOTH:
 			{
 				u_int64_t bytes;
 				u_int64_t pkts;
@@ -117,30 +121,36 @@ match(const struct sk_buff *skb,
 }
 
 static int check(const char *tablename,
-		 const struct ipt_ip *ip,
+		 const void *ip,
 		 void *matchinfo,
 		 unsigned int matchsize,
 		 unsigned int hook_mask)
 {
-	const struct ipt_connbytes_info *sinfo = matchinfo;
+	const struct xt_connbytes_info *sinfo = matchinfo;
 
-	if (matchsize != IPT_ALIGN(sizeof(struct ipt_connbytes_info)))
+	if (matchsize != XT_ALIGN(sizeof(struct xt_connbytes_info)))
 		return 0;
 
-	if (sinfo->what != IPT_CONNBYTES_PKTS &&
-	    sinfo->what != IPT_CONNBYTES_BYTES &&
-	    sinfo->what != IPT_CONNBYTES_AVGPKT)
+	if (sinfo->what != XT_CONNBYTES_PKTS &&
+	    sinfo->what != XT_CONNBYTES_BYTES &&
+	    sinfo->what != XT_CONNBYTES_AVGPKT)
 		return 0;
 
-	if (sinfo->direction != IPT_CONNBYTES_DIR_ORIGINAL &&
-	    sinfo->direction != IPT_CONNBYTES_DIR_REPLY &&
-	    sinfo->direction != IPT_CONNBYTES_DIR_BOTH)
+	if (sinfo->direction != XT_CONNBYTES_DIR_ORIGINAL &&
+	    sinfo->direction != XT_CONNBYTES_DIR_REPLY &&
+	    sinfo->direction != XT_CONNBYTES_DIR_BOTH)
 		return 0;
 
 	return 1;
 }
 
-static struct ipt_match state_match = {
+static struct xt_match connbytes_match = {
+	.name		= "connbytes",
+	.match		= &match,
+	.checkentry	= &check,
+	.me		= THIS_MODULE
+};
+static struct xt_match connbytes6_match = {
 	.name		= "connbytes",
 	.match		= &match,
 	.checkentry	= &check,
@@ -149,12 +159,21 @@ static struct ipt_match state_match = {
 
 static int __init init(void)
 {
-	return ipt_register_match(&state_match);
+	int ret;
+	ret = xt_register_match(AF_INET, &connbytes_match);
+	if (ret)
+		return ret;
+
+	ret = xt_register_match(AF_INET6, &connbytes6_match);
+	if (ret)
+		xt_unregister_match(AF_INET, &connbytes_match);
+	return ret;
 }
 
 static void __exit fini(void)
 {
-	ipt_unregister_match(&state_match);
+	xt_unregister_match(AF_INET, &connbytes_match);
+	xt_unregister_match(AF_INET6, &connbytes6_match);
 }
 
 module_init(init);

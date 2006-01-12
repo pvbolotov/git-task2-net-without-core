@@ -1,7 +1,7 @@
 /* Kernel module to match connection tracking information. */
 
 /* (C) 1999-2001 Paul `Rusty' Russell
- * (C) 2002-2004 Netfilter Core Team <coreteam@netfilter.org>
+ * (C) 2002-2005 Netfilter Core Team <coreteam@netfilter.org>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -11,12 +11,14 @@
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <net/netfilter/nf_conntrack_compat.h>
-#include <linux/netfilter_ipv4/ip_tables.h>
-#include <linux/netfilter_ipv4/ipt_state.h>
+#include <linux/netfilter/x_tables.h>
+#include <linux/netfilter/xt_state.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Rusty Russell <rusty@rustcorp.com.au>");
-MODULE_DESCRIPTION("iptables connection tracking state match module");
+MODULE_DESCRIPTION("ip[6]_tables connection tracking state match module");
+MODULE_ALIAS("ipt_state");
+MODULE_ALIAS("ip6t_state");
 
 static int
 match(const struct sk_buff *skb,
@@ -24,35 +26,43 @@ match(const struct sk_buff *skb,
       const struct net_device *out,
       const void *matchinfo,
       int offset,
+      unsigned int protoff,
       int *hotdrop)
 {
-	const struct ipt_state_info *sinfo = matchinfo;
+	const struct xt_state_info *sinfo = matchinfo;
 	enum ip_conntrack_info ctinfo;
 	unsigned int statebit;
 
 	if (nf_ct_is_untracked(skb))
-		statebit = IPT_STATE_UNTRACKED;
+		statebit = XT_STATE_UNTRACKED;
 	else if (!nf_ct_get_ctinfo(skb, &ctinfo))
-		statebit = IPT_STATE_INVALID;
+		statebit = XT_STATE_INVALID;
 	else
-		statebit = IPT_STATE_BIT(ctinfo);
+		statebit = XT_STATE_BIT(ctinfo);
 
 	return (sinfo->statemask & statebit);
 }
 
 static int check(const char *tablename,
-		 const struct ipt_ip *ip,
+		 const void *ip,
 		 void *matchinfo,
 		 unsigned int matchsize,
 		 unsigned int hook_mask)
 {
-	if (matchsize != IPT_ALIGN(sizeof(struct ipt_state_info)))
+	if (matchsize != XT_ALIGN(sizeof(struct xt_state_info)))
 		return 0;
 
 	return 1;
 }
 
-static struct ipt_match state_match = {
+static struct xt_match state_match = {
+	.name		= "state",
+	.match		= &match,
+	.checkentry	= &check,
+	.me		= THIS_MODULE,
+};
+
+static struct xt_match state6_match = {
 	.name		= "state",
 	.match		= &match,
 	.checkentry	= &check,
@@ -61,13 +71,25 @@ static struct ipt_match state_match = {
 
 static int __init init(void)
 {
-	need_ip_conntrack();
-	return ipt_register_match(&state_match);
+	int ret;
+
+	need_conntrack();
+
+	ret = xt_register_match(AF_INET, &state_match);
+	if (ret < 0)
+		return ret;
+
+	ret = xt_register_match(AF_INET6, &state6_match);
+	if (ret < 0)
+		xt_unregister_match(AF_INET,&state_match);
+
+	return ret;
 }
 
 static void __exit fini(void)
 {
-	ipt_unregister_match(&state_match);
+	xt_unregister_match(AF_INET, &state_match);
+	xt_unregister_match(AF_INET6, &state6_match);
 }
 
 module_init(init);

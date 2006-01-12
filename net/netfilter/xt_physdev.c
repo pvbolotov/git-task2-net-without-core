@@ -9,10 +9,9 @@
  */
 
 #include <linux/module.h>
-#include <linux/netdevice.h>
 #include <linux/skbuff.h>
-#include <linux/netfilter_ipv4/ipt_physdev.h>
-#include <linux/netfilter_ipv4/ip_tables.h>
+#include <linux/netfilter/xt_physdev.h>
+#include <linux/netfilter/x_tables.h>
 #include <linux/netfilter_bridge.h>
 #define MATCH   1
 #define NOMATCH 0
@@ -20,6 +19,8 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Bart De Schuymer <bdschuym@pandora.be>");
 MODULE_DESCRIPTION("iptables bridge physical device match module");
+MODULE_ALIAS("ipt_physdev");
+MODULE_ALIAS("ip6t_physdev");
 
 static int
 match(const struct sk_buff *skb,
@@ -27,11 +28,12 @@ match(const struct sk_buff *skb,
       const struct net_device *out,
       const void *matchinfo,
       int offset,
+      unsigned int protoff,
       int *hotdrop)
 {
 	int i;
 	static const char nulldevname[IFNAMSIZ];
-	const struct ipt_physdev_info *info = matchinfo;
+	const struct xt_physdev_info *info = matchinfo;
 	unsigned int ret;
 	const char *indev, *outdev;
 	struct nf_bridge_info *nf_bridge;
@@ -41,37 +43,37 @@ match(const struct sk_buff *skb,
 	 * the destination device will be a bridge. */
 	if (!(nf_bridge = skb->nf_bridge)) {
 		/* Return MATCH if the invert flags of the used options are on */
-		if ((info->bitmask & IPT_PHYSDEV_OP_BRIDGED) &&
-		    !(info->invert & IPT_PHYSDEV_OP_BRIDGED))
+		if ((info->bitmask & XT_PHYSDEV_OP_BRIDGED) &&
+		    !(info->invert & XT_PHYSDEV_OP_BRIDGED))
 			return NOMATCH;
-		if ((info->bitmask & IPT_PHYSDEV_OP_ISIN) &&
-		    !(info->invert & IPT_PHYSDEV_OP_ISIN))
+		if ((info->bitmask & XT_PHYSDEV_OP_ISIN) &&
+		    !(info->invert & XT_PHYSDEV_OP_ISIN))
 			return NOMATCH;
-		if ((info->bitmask & IPT_PHYSDEV_OP_ISOUT) &&
-		    !(info->invert & IPT_PHYSDEV_OP_ISOUT))
+		if ((info->bitmask & XT_PHYSDEV_OP_ISOUT) &&
+		    !(info->invert & XT_PHYSDEV_OP_ISOUT))
 			return NOMATCH;
-		if ((info->bitmask & IPT_PHYSDEV_OP_IN) &&
-		    !(info->invert & IPT_PHYSDEV_OP_IN))
+		if ((info->bitmask & XT_PHYSDEV_OP_IN) &&
+		    !(info->invert & XT_PHYSDEV_OP_IN))
 			return NOMATCH;
-		if ((info->bitmask & IPT_PHYSDEV_OP_OUT) &&
-		    !(info->invert & IPT_PHYSDEV_OP_OUT))
+		if ((info->bitmask & XT_PHYSDEV_OP_OUT) &&
+		    !(info->invert & XT_PHYSDEV_OP_OUT))
 			return NOMATCH;
 		return MATCH;
 	}
 
 	/* This only makes sense in the FORWARD and POSTROUTING chains */
-	if ((info->bitmask & IPT_PHYSDEV_OP_BRIDGED) &&
+	if ((info->bitmask & XT_PHYSDEV_OP_BRIDGED) &&
 	    (!!(nf_bridge->mask & BRNF_BRIDGED) ^
-	    !(info->invert & IPT_PHYSDEV_OP_BRIDGED)))
+	    !(info->invert & XT_PHYSDEV_OP_BRIDGED)))
 		return NOMATCH;
 
-	if ((info->bitmask & IPT_PHYSDEV_OP_ISIN &&
-	    (!nf_bridge->physindev ^ !!(info->invert & IPT_PHYSDEV_OP_ISIN))) ||
-	    (info->bitmask & IPT_PHYSDEV_OP_ISOUT &&
-	    (!nf_bridge->physoutdev ^ !!(info->invert & IPT_PHYSDEV_OP_ISOUT))))
+	if ((info->bitmask & XT_PHYSDEV_OP_ISIN &&
+	    (!nf_bridge->physindev ^ !!(info->invert & XT_PHYSDEV_OP_ISIN))) ||
+	    (info->bitmask & XT_PHYSDEV_OP_ISOUT &&
+	    (!nf_bridge->physoutdev ^ !!(info->invert & XT_PHYSDEV_OP_ISOUT))))
 		return NOMATCH;
 
-	if (!(info->bitmask & IPT_PHYSDEV_OP_IN))
+	if (!(info->bitmask & XT_PHYSDEV_OP_IN))
 		goto match_outdev;
 	indev = nf_bridge->physindev ? nf_bridge->physindev->name : nulldevname;
 	for (i = 0, ret = 0; i < IFNAMSIZ/sizeof(unsigned int); i++) {
@@ -80,11 +82,11 @@ match(const struct sk_buff *skb,
 			& ((const unsigned int *)info->in_mask)[i];
 	}
 
-	if ((ret == 0) ^ !(info->invert & IPT_PHYSDEV_OP_IN))
+	if ((ret == 0) ^ !(info->invert & XT_PHYSDEV_OP_IN))
 		return NOMATCH;
 
 match_outdev:
-	if (!(info->bitmask & IPT_PHYSDEV_OP_OUT))
+	if (!(info->bitmask & XT_PHYSDEV_OP_OUT))
 		return MATCH;
 	outdev = nf_bridge->physoutdev ?
 		 nf_bridge->physoutdev->name : nulldevname;
@@ -94,27 +96,34 @@ match_outdev:
 			& ((const unsigned int *)info->out_mask)[i];
 	}
 
-	return (ret != 0) ^ !(info->invert & IPT_PHYSDEV_OP_OUT);
+	return (ret != 0) ^ !(info->invert & XT_PHYSDEV_OP_OUT);
 }
 
 static int
 checkentry(const char *tablename,
-		       const struct ipt_ip *ip,
+		       const void *ip,
 		       void *matchinfo,
 		       unsigned int matchsize,
 		       unsigned int hook_mask)
 {
-	const struct ipt_physdev_info *info = matchinfo;
+	const struct xt_physdev_info *info = matchinfo;
 
-	if (matchsize != IPT_ALIGN(sizeof(struct ipt_physdev_info)))
+	if (matchsize != XT_ALIGN(sizeof(struct xt_physdev_info)))
 		return 0;
-	if (!(info->bitmask & IPT_PHYSDEV_OP_MASK) ||
-	    info->bitmask & ~IPT_PHYSDEV_OP_MASK)
+	if (!(info->bitmask & XT_PHYSDEV_OP_MASK) ||
+	    info->bitmask & ~XT_PHYSDEV_OP_MASK)
 		return 0;
 	return 1;
 }
 
-static struct ipt_match physdev_match = {
+static struct xt_match physdev_match = {
+	.name		= "physdev",
+	.match		= &match,
+	.checkentry	= &checkentry,
+	.me		= THIS_MODULE,
+};
+
+static struct xt_match physdev6_match = {
 	.name		= "physdev",
 	.match		= &match,
 	.checkentry	= &checkentry,
@@ -123,12 +132,23 @@ static struct ipt_match physdev_match = {
 
 static int __init init(void)
 {
-	return ipt_register_match(&physdev_match);
+	int ret;
+
+	ret = xt_register_match(AF_INET, &physdev_match);
+	if (ret < 0)
+		return ret;
+
+	ret = xt_register_match(AF_INET6, &physdev6_match);
+	if (ret < 0)
+		xt_unregister_match(AF_INET, &physdev_match);
+
+	return ret;
 }
 
 static void __exit fini(void)
 {
-	ipt_unregister_match(&physdev_match);
+	xt_unregister_match(AF_INET, &physdev_match);
+	xt_unregister_match(AF_INET6, &physdev6_match);
 }
 
 module_init(init);
