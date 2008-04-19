@@ -10,7 +10,7 @@
 
 #include <linux/kernel.h>
 #include <linux/rtnetlink.h>
-#include "ieee80211_rate.h"
+#include "rate.h"
 #include "ieee80211_i.h"
 
 struct rate_control_alg {
@@ -163,34 +163,37 @@ static void rate_control_release(struct kref *kref)
 }
 
 void rate_control_get_rate(struct net_device *dev,
-			   struct ieee80211_hw_mode *mode, struct sk_buff *skb,
+			   struct ieee80211_supported_band *sband,
+			   struct sk_buff *skb,
 			   struct rate_selection *sel)
 {
 	struct ieee80211_local *local = wdev_priv(dev->ieee80211_ptr);
 	struct rate_control_ref *ref = local->rate_ctrl;
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
-	struct sta_info *sta = sta_info_get(local, hdr->addr1);
+	struct sta_info *sta;
 	int i;
+
+	rcu_read_lock();
+	sta = sta_info_get(local, hdr->addr1);
 
 	memset(sel, 0, sizeof(struct rate_selection));
 
-	ref->ops->get_rate(ref->priv, dev, mode, skb, sel);
+	ref->ops->get_rate(ref->priv, dev, sband, skb, sel);
 
 	/* Select a non-ERP backup rate. */
 	if (!sel->nonerp) {
-		for (i = 0; i < mode->num_rates - 1; i++) {
-			struct ieee80211_rate *rate = &mode->rates[i];
-			if (sel->rate->rate < rate->rate)
+		for (i = 0; i < sband->n_bitrates; i++) {
+			struct ieee80211_rate *rate = &sband->bitrates[i];
+			if (sel->rate->bitrate < rate->bitrate)
 				break;
 
-			if (rate_supported(sta, mode, i) &&
-			    !(rate->flags & IEEE80211_RATE_ERP))
+			if (rate_supported(sta, sband->band, i) &&
+			    !(rate->flags & IEEE80211_RATE_ERP_G))
 				sel->nonerp = rate;
 		}
 	}
 
-	if (sta)
-		sta_info_put(sta);
+	rcu_read_unlock();
 }
 
 struct rate_control_ref *rate_control_get(struct rate_control_ref *ref)
