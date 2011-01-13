@@ -1,5 +1,5 @@
 /*
- * net/tipc/dbg.c: TIPC print buffer routines for debugging
+ * net/tipc/log.c: TIPC print buffer routines for debugging
  *
  * Copyright (c) 1996-2006, Ericsson AB
  * Copyright (c) 2005-2007, Wind River Systems
@@ -36,7 +36,7 @@
 
 #include "core.h"
 #include "config.h"
-#include "dbg.h"
+#include "log.h"
 
 /*
  * TIPC pre-defines the following print buffers:
@@ -52,7 +52,7 @@ static struct print_buf null_buf = { NULL, 0, NULL, 0 };
 struct print_buf *const TIPC_NULL = &null_buf;
 
 static struct print_buf cons_buf = { NULL, 0, NULL, 1 };
-static struct print_buf *const TIPC_CONS = &cons_buf;
+struct print_buf *const TIPC_CONS = &cons_buf;
 
 static struct print_buf log_buf = { NULL, 0, NULL, 1 };
 struct print_buf *const TIPC_LOG = &log_buf;
@@ -64,9 +64,9 @@ struct print_buf *const TIPC_LOG = &log_buf;
  * 'print_string' when writing to a print buffer. This also protects against
  * concurrent writes to the print buffer being written to.
  *
- * 2) tipc_dump() and tipc_log_XXX() leverage the aforementioned
- * use of 'print_lock' to protect against all types of concurrent operations
- * on their associated print buffer (not just write operations).
+ * 2) tipc_log_XXX() leverages the aforementioned use of 'print_lock' to
+ * protect against all types of concurrent operations on their associated
+ * print buffer (not just write operations).
  *
  * Note: All routines of the form tipc_printbuf_XXX() are lock-free, and rely
  * on the caller to prevent simultaneous use of the print buffer(s) being
@@ -76,18 +76,16 @@ struct print_buf *const TIPC_LOG = &log_buf;
 static char print_string[TIPC_PB_MAX_STR];
 static DEFINE_SPINLOCK(print_lock);
 
-static void tipc_printbuf_reset(struct print_buf *pb);
-static int  tipc_printbuf_empty(struct print_buf *pb);
 static void tipc_printbuf_move(struct print_buf *pb_to,
 			       struct print_buf *pb_from);
 
-#define FORMAT(PTR,LEN,FMT) \
+#define FORMAT(PTR, LEN, FMT) \
 {\
-       va_list args;\
-       va_start(args, FMT);\
-       LEN = vsprintf(PTR, FMT, args);\
-       va_end(args);\
-       *(PTR + LEN) = '\0';\
+	va_list args;\
+	va_start(args, FMT);\
+	LEN = vsprintf(PTR, FMT, args);\
+	va_end(args);\
+	*(PTR + LEN) = '\0';\
 }
 
 /**
@@ -268,81 +266,6 @@ void tipc_printf(struct print_buf *pb, const char *fmt, ...)
 	spin_unlock_bh(&print_lock);
 }
 
-#ifdef CONFIG_TIPC_DEBUG
-
-/**
- * print_to_console - write string of bytes to console in multiple chunks
- */
-
-static void print_to_console(char *crs, int len)
-{
-	int rest = len;
-
-	while (rest > 0) {
-		int sz = rest < TIPC_PB_MAX_STR ? rest : TIPC_PB_MAX_STR;
-		char c = crs[sz];
-
-		crs[sz] = 0;
-		printk((const char *)crs);
-		crs[sz] = c;
-		rest -= sz;
-		crs += sz;
-	}
-}
-
-/**
- * printbuf_dump - write print buffer contents to console
- */
-
-static void printbuf_dump(struct print_buf *pb)
-{
-	int len;
-
-	if (!pb->buf) {
-		printk("*** PRINT BUFFER NOT ALLOCATED ***");
-		return;
-	}
-
-	/* Dump print buffer from char after cursor to end (if used) */
-
-	len = pb->buf + pb->size - pb->crs - 2;
-	if ((pb->buf[pb->size - 1] == 0) && (len > 0))
-		print_to_console(pb->crs + 1, len);
-
-	/* Dump print buffer from start to cursor (always) */
-
-	len = pb->crs - pb->buf;
-	print_to_console(pb->buf, len);
-}
-
-/**
- * tipc_dump_dbg - dump (non-console) print buffer to console
- * @pb: pointer to print buffer
- */
-
-void tipc_dump_dbg(struct print_buf *pb, const char *fmt, ...)
-{
-	int len;
-
-	if (pb == TIPC_CONS)
-		return;
-
-	spin_lock_bh(&print_lock);
-
-	FORMAT(print_string, len, fmt);
-	printk(print_string);
-
-	printk("\n---- Start of %s log dump ----\n\n",
-	       (pb == TIPC_LOG) ? "global" : "local");
-	printbuf_dump(pb);
-	tipc_printbuf_reset(pb);
-	printk("\n---- End of dump ----\n");
-
-	spin_unlock_bh(&print_lock);
-}
-
-#endif
-
 /**
  * tipc_log_resize - change the size of the TIPC log buffer
  * @log_size: print buffer size to use
@@ -353,10 +276,8 @@ int tipc_log_resize(int log_size)
 	int res = 0;
 
 	spin_lock_bh(&print_lock);
-	if (TIPC_LOG->buf) {
-		kfree(TIPC_LOG->buf);
-		TIPC_LOG->buf = NULL;
-	}
+	kfree(TIPC_LOG->buf);
+	TIPC_LOG->buf = NULL;
 	if (log_size) {
 		if (log_size < TIPC_PB_MIN_SIZE)
 			log_size = TIPC_PB_MIN_SIZE;
@@ -407,8 +328,7 @@ struct sk_buff *tipc_log_dump(void)
 	} else if (tipc_printbuf_empty(TIPC_LOG)) {
 		spin_unlock_bh(&print_lock);
 		reply = tipc_cfg_reply_ultra_string("log is empty\n");
-	}
-	else {
+	} else {
 		struct tlv_desc *rep_tlv;
 		struct print_buf pb;
 		int str_len;
@@ -429,4 +349,3 @@ struct sk_buff *tipc_log_dump(void)
 	}
 	return reply;
 }
-
