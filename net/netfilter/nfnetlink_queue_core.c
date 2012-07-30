@@ -30,6 +30,7 @@
 #include <linux/list.h>
 #include <net/sock.h>
 #include <net/netfilter/nf_queue.h>
+#include <net/netfilter/nfnetlink_queue.h>
 
 #include <linux/atomic.h>
 
@@ -52,6 +53,7 @@ struct nfqnl_instance {
 
 	u_int16_t queue_num;			/* number of this queue */
 	u_int8_t copy_mode;
+	u_int32_t flags;			/* Set using NFQA_CFG_FLAGS */
 /*
  * Following fields are dirtied for each queued packet,
  * keep them in same cache line if possible.
@@ -232,6 +234,8 @@ nfqnl_build_packet_message(struct nfqnl_instance *queue,
 	struct sk_buff *entskb = entry->skb;
 	struct net_device *indev;
 	struct net_device *outdev;
+	struct nf_conn *ct = NULL;
+	enum ip_conntrack_info uninitialized_var(ctinfo);
 
 	size =    NLMSG_SPACE(sizeof(struct nfgenmsg))
 		+ nla_total_size(sizeof(struct nfqnl_msg_packet_hdr))
@@ -265,16 +269,22 @@ nfqnl_build_packet_message(struct nfqnl_instance *queue,
 		break;
 	}
 
+	if (queue->flags & NFQA_CFG_F_CONNTRACK)
+		ct = nfqnl_ct_get(entskb, &size, &ctinfo);
 
 	skb = alloc_skb(size, GFP_ATOMIC);
 	if (!skb)
-		goto nlmsg_failure;
+		return NULL;
 
 	old_tail = skb->tail;
-	nlh = NLMSG_PUT(skb, 0, 0,
+	nlh = nlmsg_put(skb, 0, 0,
 			NFNL_SUBSYS_QUEUE << 8 | NFQNL_MSG_PACKET,
-			sizeof(struct nfgenmsg));
-	nfmsg = NLMSG_DATA(nlh);
+			sizeof(struct nfgenmsg), 0);
+	if (!nlh) {
+		kfree_skb(skb);
+		return NULL;
+	}
+	nfmsg = nlmsg_data(nlh);
 	nfmsg->nfgen_family = entry->pf;
 	nfmsg->version = NFNETLINK_V0;
 	nfmsg->res_id = htons(queue->queue_num);
@@ -377,7 +387,8 @@ nfqnl_build_packet_message(struct nfqnl_instance *queue,
 
 		if (skb_tailroom(skb) < nla_total_size(data_len)) {
 			printk(KERN_WARNING "nf_queue: no tailroom!\n");
-			goto nlmsg_failure;
+			kfree_skb(skb);
+			return NULL;
 		}
 
 		nla = (struct nlattr *)skb_put(skb, nla_total_size(data_len));
@@ -388,10 +399,12 @@ nfqnl_build_packet_message(struct nfqnl_instance *queue,
 			BUG();
 	}
 
+	if (ct && nfqnl_ct_put(skb, ct, ctinfo) < 0)
+		goto nla_put_failure;
+
 	nlh->nlmsg_len = skb->tail - old_tail;
 	return skb;
 
-nlmsg_failure:
 nla_put_failure:
 	if (skb)
 		kfree_skb(skb);
@@ -406,6 +419,7 @@ nfqnl_enqueue_packet(struct nf_queue_entry *entry, unsigned int queuenum)
 	struct nfqnl_instance *queue;
 	int err = -ENOBUFS;
 	__be32 *packet_id_ptr;
+	int failopen = 0;
 
 	/* rcu_read_lock()ed by nf_hook_slow() */
 	queue = instance_lookup(queuenum);
@@ -431,9 +445,14 @@ nfqnl_enqueue_packet(struct nf_queue_entry *entry, unsigned int queuenum)
 		goto err_out_free_nskb;
 	}
 	if (queue->queue_total >= queue->queue_maxlen) {
-		queue->queue_dropped++;
-		net_warn_ratelimited("nf_queue: full at %d entries, dropping packets(s)\n",
-				     queue->queue_total);
+		if (queue->flags & NFQA_CFG_F_FAIL_OPEN) {
+			failopen = 1;
+			err = 0;
+		} else {
+			queue->queue_dropped++;
+			net_warn_ratelimited("nf_queue: full at %d entries, dropping packets(s)\n",
+					     queue->queue_total);
+		}
 		goto err_out_free_nskb;
 	}
 	entry->id = ++queue->id_sequence;
@@ -455,17 +474,17 @@ err_out_free_nskb:
 	kfree_skb(nskb);
 err_out_unlock:
 	spin_unlock_bh(&queue->lock);
+	if (failopen)
+		nf_reinject(entry, NF_ACCEPT);
 err_out:
 	return err;
 }
 
 static int
-nfqnl_mangle(void *data, int data_len, struct nf_queue_entry *e)
+nfqnl_mangle(void *data, int data_len, struct nf_queue_entry *e, int diff)
 {
 	struct sk_buff *nskb;
-	int diff;
 
-	diff = data_len - e->skb->len;
 	if (diff < 0) {
 		if (pskb_trim(e->skb, data_len))
 			return -ENOMEM;
@@ -623,6 +642,7 @@ static const struct nla_policy nfqa_verdict_policy[NFQA_MAX+1] = {
 	[NFQA_VERDICT_HDR]	= { .len = sizeof(struct nfqnl_msg_verdict_hdr) },
 	[NFQA_MARK]		= { .type = NLA_U32 },
 	[NFQA_PAYLOAD]		= { .type = NLA_UNSPEC },
+	[NFQA_CT]		= { .type = NLA_UNSPEC },
 };
 
 static const struct nla_policy nfqa_verdict_batch_policy[NFQA_MAX+1] = {
@@ -670,7 +690,7 @@ nfqnl_recv_verdict_batch(struct sock *ctnl, struct sk_buff *skb,
 		   const struct nlmsghdr *nlh,
 		   const struct nlattr * const nfqa[])
 {
-	struct nfgenmsg *nfmsg = NLMSG_DATA(nlh);
+	struct nfgenmsg *nfmsg = nlmsg_data(nlh);
 	struct nf_queue_entry *entry, *tmp;
 	unsigned int verdict, maxid;
 	struct nfqnl_msg_verdict_hdr *vhdr;
@@ -716,13 +736,15 @@ nfqnl_recv_verdict(struct sock *ctnl, struct sk_buff *skb,
 		   const struct nlmsghdr *nlh,
 		   const struct nlattr * const nfqa[])
 {
-	struct nfgenmsg *nfmsg = NLMSG_DATA(nlh);
+	struct nfgenmsg *nfmsg = nlmsg_data(nlh);
 	u_int16_t queue_num = ntohs(nfmsg->res_id);
 
 	struct nfqnl_msg_verdict_hdr *vhdr;
 	struct nfqnl_instance *queue;
 	unsigned int verdict;
 	struct nf_queue_entry *entry;
+	enum ip_conntrack_info uninitialized_var(ctinfo);
+	struct nf_conn *ct = NULL;
 
 	queue = instance_lookup(queue_num);
 	if (!queue)
@@ -741,11 +763,22 @@ nfqnl_recv_verdict(struct sock *ctnl, struct sk_buff *skb,
 	if (entry == NULL)
 		return -ENOENT;
 
+	rcu_read_lock();
+	if (nfqa[NFQA_CT] && (queue->flags & NFQA_CFG_F_CONNTRACK))
+		ct = nfqnl_ct_parse(entry->skb, nfqa[NFQA_CT], &ctinfo);
+
 	if (nfqa[NFQA_PAYLOAD]) {
+		u16 payload_len = nla_len(nfqa[NFQA_PAYLOAD]);
+		int diff = payload_len - entry->skb->len;
+
 		if (nfqnl_mangle(nla_data(nfqa[NFQA_PAYLOAD]),
-				 nla_len(nfqa[NFQA_PAYLOAD]), entry) < 0)
+				 payload_len, entry, diff) < 0)
 			verdict = NF_DROP;
+
+		if (ct)
+			nfqnl_ct_seq_adjust(skb, ct, ctinfo, diff);
 	}
+	rcu_read_unlock();
 
 	if (nfqa[NFQA_MARK])
 		entry->skb->mark = ntohl(nla_get_be32(nfqa[NFQA_MARK]));
@@ -777,7 +810,7 @@ nfqnl_recv_config(struct sock *ctnl, struct sk_buff *skb,
 		  const struct nlmsghdr *nlh,
 		  const struct nlattr * const nfqa[])
 {
-	struct nfgenmsg *nfmsg = NLMSG_DATA(nlh);
+	struct nfgenmsg *nfmsg = nlmsg_data(nlh);
 	u_int16_t queue_num = ntohs(nfmsg->res_id);
 	struct nfqnl_instance *queue;
 	struct nfqnl_msg_config_cmd *cmd = NULL;
@@ -855,6 +888,36 @@ nfqnl_recv_config(struct sock *ctnl, struct sk_buff *skb,
 		queue_maxlen = nla_data(nfqa[NFQA_CFG_QUEUE_MAXLEN]);
 		spin_lock_bh(&queue->lock);
 		queue->queue_maxlen = ntohl(*queue_maxlen);
+		spin_unlock_bh(&queue->lock);
+	}
+
+	if (nfqa[NFQA_CFG_FLAGS]) {
+		__u32 flags, mask;
+
+		if (!queue) {
+			ret = -ENODEV;
+			goto err_out_unlock;
+		}
+
+		if (!nfqa[NFQA_CFG_MASK]) {
+			/* A mask is needed to specify which flags are being
+			 * changed.
+			 */
+			ret = -EINVAL;
+			goto err_out_unlock;
+		}
+
+		flags = ntohl(nla_get_be32(nfqa[NFQA_CFG_FLAGS]));
+		mask = ntohl(nla_get_be32(nfqa[NFQA_CFG_MASK]));
+
+		if (flags >= NFQA_CFG_F_MAX) {
+			ret = -EOPNOTSUPP;
+			goto err_out_unlock;
+		}
+
+		spin_lock_bh(&queue->lock);
+		queue->flags &= ~mask;
+		queue->flags |= flags & mask;
 		spin_unlock_bh(&queue->lock);
 	}
 
